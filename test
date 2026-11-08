@@ -1,1 +1,298 @@
 
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LP = Players.LocalPlayer
+
+local PARRY_WINDOW = 0.65 -- IsParrying длится ~0.5с; дольше = флаг залип, не блокируем
+
+-- методы как обычные функции (вызов f(obj, ...) НЕ идёт через __namecall)
+local IsA = game.IsA
+local FindFirstChild = game.FindFirstChild
+local IsDescendantOf = game.IsDescendantOf
+
+-- ============ cleanup старых версий ============
+pcall(function()
+    local old = LP:WaitForChild("PlayerGui"):FindFirstChild("MM_AntiParryUI")
+    if old then old:Destroy() end
+end)
+for _, key in ipairs({"MM_AntiParryLoop", "MM_AntiParryInput"}) do
+    if getgenv()[key] then
+        pcall(function() getgenv()[key]:Disconnect() end)
+        getgenv()[key] = nil
+    end
+end
+-- старый (сломанный) хук нельзя снять: делаем его пассивным
+if type(getgenv().MM_AntiParry) == "table" then
+    getgenv().MM_AntiParry.Enabled = false
+end
+
+getgenv().MM_AntiParryV2 = getgenv().MM_AntiParryV2 or {
+    Enabled = true,
+    Blocked = 0,
+    Passed = 0,
+    LastTarget = nil,
+    LastBlockedAt = 0,
+}
+local Cfg = getgenv().MM_AntiParryV2
+Cfg.Blocked = Cfg.Blocked or 0
+Cfg.Passed = Cfg.Passed or 0
+Cfg.LastBlockedAt = Cfg.LastBlockedAt or 0
+
+-- ============ состояние IsParrying ============
+local since = setmetatable({}, {__mode = "k"}) -- flag -> момент, когда стало true
+
+local function getFlag(char)
+    if not char then return nil end
+    local ci = FindFirstChild(char, "CharacterInformation")
+    local flag = ci and FindFirstChild(ci, "IsParrying")
+    if flag and IsA(flag, "BoolValue") then
+        return flag
+    end
+    return nil
+end
+
+local function isParryingChar(char)
+    local flag = getFlag(char)
+    if not flag or flag.Value ~= true then
+        return false
+    end
+    local t = since[flag]
+    if not t then
+        t = os.clock()
+        since[flag] = t
+    end
+    return (os.clock() - t) <= PARRY_WINDOW
+end
+
+local function trackFlags()
+    local folder = workspace:FindFirstChild("PlayersCharacters")
+    if not folder then return end
+    for _, char in ipairs(folder:GetChildren()) do
+        local flag = getFlag(char)
+        if flag then
+            if flag.Value == true then
+                if not since[flag] then since[flag] = os.clock() end
+            else
+                since[flag] = nil
+            end
+        end
+    end
+end
+
+-- ============ HOOK ============
+-- Вся логика в заменяемой функции. БЕЗ namecall-вызовов внутри.
+getgenv().MM_AntiParryCheck = function(self, targetArg)
+    if self.ClassName ~= "RemoteEvent" or self.Name ~= "hit" then
+        return false
+    end
+    local tool = self.Parent
+    local myChar = LP.Character
+    if not tool or not myChar or tool.ClassName ~= "Tool" or not IsDescendantOf(tool, myChar) then
+        return false
+    end
+    if typeof(targetArg) ~= "Instance" or targetArg.ClassName ~= "Humanoid" then
+        return false
+    end
+
+    local char = targetArg.Parent
+    if isParryingChar(char) then
+        Cfg.Blocked = Cfg.Blocked + 1
+        Cfg.LastBlockedAt = os.clock()
+        Cfg.LastTarget = char and char.Name or "?"
+        return true
+    end
+
+    Cfg.Passed = Cfg.Passed + 1
+    return false
+end
+
+if not getgenv().MM_AntiParryHookV2 then
+    getgenv().MM_AntiParryHookV2 = true
+
+    local oldNC
+    oldNC = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+        local method = getnamecallmethod()
+        if method == "FireServer" and Cfg.Enabled then
+            local check = getgenv().MM_AntiParryCheck
+            if check then
+                local ok, block = pcall(check, self, ...)
+                if ok and block then
+                    return nil
+                end
+            end
+            -- на случай, если что-то выше затронуло namecall-состояние
+            if setnamecallmethod then
+                setnamecallmethod(method)
+            end
+        end
+        return oldNC(self, ...)
+    end))
+end
+
+-- ============ UI ============
+local gui = Instance.new("ScreenGui")
+gui.Name = "MM_AntiParryUI"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = LP:WaitForChild("PlayerGui")
+
+local main = Instance.new("Frame")
+main.Size = UDim2.new(0, 280, 0, 168)
+main.Position = UDim2.new(0, 20, 0, 20)
+main.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+main.BorderSizePixel = 0
+main.Active = true
+main.Draggable = true
+main.Parent = gui
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
+
+local stroke = Instance.new("UIStroke", main)
+stroke.Color = Color3.fromRGB(60, 60, 70)
+stroke.Thickness = 1
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -20, 0, 22)
+title.Position = UDim2.new(0, 10, 0, 8)
+title.BackgroundTransparency = 1
+title.Text = "Anti-Parry | Mortem"
+title.TextColor3 = Color3.fromRGB(235, 235, 240)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 14
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = main
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, -20, 0, 18)
+status.Position = UDim2.new(0, 10, 0, 32)
+status.BackgroundTransparency = 1
+status.Text = "..."
+status.TextColor3 = Color3.fromRGB(150, 150, 160)
+status.Font = Enum.Font.GothamBold
+status.TextSize = 12
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.TextTruncate = Enum.TextTruncate.AtEnd
+status.Parent = main
+
+local sub = Instance.new("TextLabel")
+sub.Size = UDim2.new(1, -20, 0, 18)
+sub.Position = UDim2.new(0, 10, 0, 52)
+sub.BackgroundTransparency = 1
+sub.Text = " "
+sub.TextColor3 = Color3.fromRGB(130, 130, 140)
+sub.Font = Enum.Font.Gotham
+sub.TextSize = 11
+sub.TextXAlignment = Enum.TextXAlignment.Left
+sub.TextTruncate = Enum.TextTruncate.AtEnd
+sub.Parent = main
+
+local btn = Instance.new("TextButton")
+btn.Size = UDim2.new(1, -20, 0, 32)
+btn.Position = UDim2.new(0, 10, 0, 78)
+btn.BackgroundColor3 = Color3.fromRGB(30, 140, 70)
+btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+btn.Font = Enum.Font.GothamBold
+btn.TextSize = 13
+btn.Text = "DISABLE [ON]"
+btn.Parent = main
+Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+
+local hint = Instance.new("TextLabel")
+hint.Size = UDim2.new(1, -20, 0, 40)
+hint.Position = UDim2.new(0, 10, 0, 118)
+hint.BackgroundTransparency = 1
+hint.Text = "RightShift — toggle. Drops your hit only while the target IsParrying (~0.5s)."
+hint.TextColor3 = Color3.fromRGB(120, 120, 130)
+hint.Font = Enum.Font.Gotham
+hint.TextSize = 10
+hint.TextXAlignment = Enum.TextXAlignment.Left
+hint.TextWrapped = true
+hint.Parent = main
+
+local function refresh()
+    if Cfg.Enabled then
+        btn.Text = "DISABLE [ON]"
+        btn.BackgroundColor3 = Color3.fromRGB(30, 140, 70)
+    else
+        btn.Text = "ENABLE [OFF]"
+        btn.BackgroundColor3 = Color3.fromRGB(150, 40, 40)
+    end
+end
+
+btn.MouseButton1Click:Connect(function()
+    Cfg.Enabled = not Cfg.Enabled
+    refresh()
+end)
+
+getgenv().MM_AntiParryInput = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then
+        return
+    end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        Cfg.Enabled = not Cfg.Enabled
+        refresh()
+    end
+end)
+
+local function nearbyParrying()
+    local myChar = LP.Character
+    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then
+        return {}
+    end
+
+    local folder = workspace:FindFirstChild("PlayersCharacters")
+    if not folder then
+        return {}
+    end
+
+    local out = {}
+    for _, char in ipairs(folder:GetChildren()) do
+        if char ~= myChar then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp and isParryingChar(char) then
+                local dist = (hrp.Position - myHRP.Position).Magnitude
+                if dist <= 60 then
+                    out[#out + 1] = string.format("%s (%.0f)", char.Name, dist)
+                end
+            end
+        end
+    end
+    return out
+end
+
+refresh()
+
+local nextUpdate = 0
+getgenv().MM_AntiParryLoop = RunService.Heartbeat:Connect(function()
+    trackFlags() -- каждый кадр: фиксируем момент включения IsParrying
+
+    local now = os.clock()
+    if now < nextUpdate then
+        return
+    end
+    nextUpdate = now + 0.1
+
+    local list = nearbyParrying()
+    if now - Cfg.LastBlockedAt < 0.45 then
+        status.Text = "BLOCKED HIT: " .. tostring(Cfg.LastTarget)
+        status.TextColor3 = Color3.fromRGB(200, 120, 255)
+        stroke.Color = Color3.fromRGB(140, 80, 220)
+    elseif not Cfg.Enabled then
+        status.Text = "OFF — hits go through"
+        status.TextColor3 = Color3.fromRGB(150, 150, 160)
+        stroke.Color = Color3.fromRGB(60, 60, 70)
+    elseif #list > 0 then
+        status.Text = "PARRY: " .. table.concat(list, ", ")
+        status.TextColor3 = Color3.fromRGB(200, 120, 255)
+        stroke.Color = Color3.fromRGB(140, 80, 220)
+    else
+        status.Text = "ARMED — waiting for parry"
+        status.TextColor3 = Color3.fromRGB(80, 200, 130)
+        stroke.Color = Color3.fromRGB(60, 60, 70)
+    end
+
+    sub.Text = "blocked: " .. tostring(Cfg.Blocked) .. " | passed: " .. tostring(Cfg.Passed) .. " | in parry: " .. tostring(#list)
+end)
+
+print("[MM AntiParry] Fixed version loaded. Enabled=" .. tostring(Cfg.Enabled))
